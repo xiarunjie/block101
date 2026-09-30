@@ -1,149 +1,4 @@
-// AD101 - content script
-// 职责：根据默认规则，在匹配的站点注入「展开全文 / 去广告」脚本，并在搜索页注入「防 App 跳转」脚本。
-const browser = window.browser ?? window.chrome;
-
-const storage = {
-    set rules(value) {
-        browser.storage.local.set({ "rules": value });
-    },
-    get rules() {
-        return browser.storage.local.get(["rules"]);
-    },
-    set rules_version(value) {
-        browser.storage.local.set({ "rules_version": value });
-    },
-    get rules_version() {
-        return browser.storage.local.get(["rules_version"]);
-    },
-};
-
-function sendMessage({ cmd, param }) {
-    browser.runtime.sendMessage({ cmd, param }).catch(() => { });
-}
-
-// ===== 供后台通过 onMessage 调用的命令（保持原有 cmd 协议不变） =====
-
-function inject(param) {
-    if ('frameId' in param) {
-        sendMessage({ cmd: "injectByFrameID", param });
-    } else {
-        sendMessage({ cmd: "inject", param });
-    }
-}
-
-function injectCSS(param) {
-    if ('frameId' in param) {
-        sendMessage({ cmd: "injectCSSByFrameID", param });
-    } else {
-        sendMessage({ cmd: "injectCSS", param });
-    }
-}
-
-function enable_ruleset(enabled) {
-    sendMessage({ cmd: "ruleset", param: enabled });
-}
-
-function init_rules() {
-    sendMessage({ cmd: "init_rules" });
-}
-
-function reload(time = 1000) {
-    setTimeout(() => location.reload(), time);
-}
-
-// ===== Toast 提示 =====
-
-const TOAST_HTML = `
-<div id="toastbox_tipwrap">
-    <p><img src="" /> <span></span></p>
-</div>
-<style>
-    #toastbox_tipwrap {
-        background: #eee;
-        position: fixed;
-        z-index: 2147483647;
-        overflow: hidden;
-        margin: 0 auto;
-        line-height: 90px;
-        text-align: center;
-        border-radius: 6px;
-        left: 50%;
-        opacity: 0;
-        transition: all .6s ease-in;
-    }
-    #toastbox_tipwrap.show{opacity:1}
-    #toastbox_tipwrap p {
-        display: flex;
-        flex-direction: row;
-        justify-content: center;
-        align-items: center;
-        font-size: 14px;
-        height: 100%;
-        margin:0;
-    }
-    #toastbox_tipwrap p img {
-        height: 60%;margin-right:5px;width:auto;
-    }
-</style>`;
-
-function toast(width, height, posY, icon, text, duration) {
-    const render = () => {
-        // 幂等：多个站点规则同时命中时只渲染一次，避免重复插入同 ID 元素
-        if (document.getElementById('toastbox_tipwrap')) return;
-        document.body.insertAdjacentHTML('beforeend', TOAST_HTML);
-        const box = document.getElementById('toastbox_tipwrap');
-        if (!box) return;
-        const iconEl = box.querySelector('img');
-        const textEl = box.querySelector('span');
-        if (iconEl) iconEl.src = icon;
-        if (textEl) textEl.innerHTML = text;
-        box.style.cssText = `width:${width}px;height:${height}px;top:${posY}%;margin-left:${-width / 2}px`;
-        setTimeout(() => box.classList.add('show'), 100);
-        setTimeout(() => {
-            box.classList.remove('show');
-            setTimeout(() => { box.style.display = 'none'; }, 600);
-        }, duration);
-    };
-    // body 尚未就绪时延后挂载（修复原版在插入前就查询 DOM 导致 toast 永远不显示的问题）
-    if (document.body) {
-        render();
-    } else {
-        setTimeout(render, 500);
-    }
-}
-
-// ===== 页面识别 =====
-
-/**
- * 识别当前是否为搜索引擎结果页。
- * @returns {'baidu'|'sm'|'tt'|null} 命中的搜索引擎标识（与 jumpapp 脚本文件后缀一致），未命中返回 null
- */
-function getSearchPage() {
-    const { search, pathname, host } = location;
-    const isBaidu = /[?&](word|wd)=/.test(search)
-        && /\/s$/.test(pathname)
-        && (host === 'm.baidu.com' || host === 'www.baidu.com');
-    if (isBaidu) return 'baidu';
-
-    const isShenma = /[?&]q=/.test(search)
-        && /\/s$/.test(pathname)
-        && /(^|\.)sm\.cn$/.test(host);
-    if (isShenma) return 'sm';
-
-    const isToutiao = /[?&]keyword=/.test(search)
-        && /\/search$/.test(pathname)
-        && /(^|\.)so\.toutiao\.com$/.test(host);
-    if (isToutiao) return 'tt';
-
-    return null;
-}
-
-// ===== 主流程 =====
-
-// 默认规则（与原版内嵌数据一致，仅格式化）
-// 说明：background 的 sync_rules 通过原生通道拉取规则并写入 storage；此处优先读取 storage，
-// 读不到（原生 App 未安装 / 首次运行）时回退到内置默认值。
-const DEFAULT_RULES = {
+{
     "showMoreWhiteList": [
         {
             "status": 1,
@@ -729,184 +584,39 @@ const DEFAULT_RULES = {
         }
     ],
     "adFreeStatus": true,
-    "tips": 1
-};
-
-// 站点匹配正则缓存：domain_list 有 40+ 条，避免每次页面加载重复编译
-const patternCache = new Map();
-
-function matchesPattern(pattern, text) {
-    let re = patternCache.get(pattern);
-    if (re === undefined) {
-        try {
-            re = new RegExp(pattern);
-        } catch (e) {
-            // 非法正则（可能来自远程下发的规则）不应中断整页逻辑
-            console.warn('[ad101] invalid pattern:', pattern);
-            re = null;
-        }
-        patternCache.set(pattern, re);
-    }
-    return re ? re.test(text) : false;
-}
-
-// 已请求过后台同步规则的标记，避免每个 frame 都重复触发
-let rulesSyncRequested = false;
-
-/**
- * 读取生效规则：优先 storage（后台原生通道下发），回退内置默认值。
- */
-async function loadRules() {
-    try {
-        const { rules } = await storage.rules;
-        if (rules && rules.domains && rules.domains.domain_list) {
-            return rules;
-        }
-    } catch (e) {
-        console.warn('[ad101] read rules from storage failed:', e);
-    }
-    if (!rulesSyncRequested) {
-        rulesSyncRequested = true;
-        init_rules();
-    }
-    return DEFAULT_RULES;
-}
-
-async function init() {
-    // 顶层 frame 处理全部逻辑；tieba / bilibili 的子 frame 也参与（原版行为）
-    const isTopFrame = window === top;
-    const host = location.host;
-    if (!isTopFrame && !/tieba\.baidu\.com|bilibili\.com/.test(host)) return;
-
-    // 站点开关 + 全局开关：用户意图独立存储（popup 写入，sync_rules 不会覆盖）。
-    // 仅在顶层 frame 判断一次，子 frame 自然跟随顶层结果。
-    let userToggles = {};
-    if (isTopFrame) {
-        try {
-            const stored = await browser.storage.local.get(["site_toggles", "extension_on"]);
-            userToggles = stored;
-            if (stored.site_toggles?.[host]?.disabled) {
-                console.info('[ad101] site disabled by user toggle:', host);
-                // 规则同步照常进行，保证恢复开关后无需特殊处理
-                if (!rulesSyncRequested) {
-                    rulesSyncRequested = true;
-                    init_rules();
-                }
-                return;
-            }
-        } catch (e) {
-            console.warn('[ad101] read user toggles failed:', e);
-        }
-    }
-
-    const rules = await loadRules();
-    if (!rules || !rules.domains || !rules.domains.domain_list) return;
-
-    // extension_on 为 undefined 时（用户从未手动设置）跟随原生下发的默认值
-    const extensionOn = typeof userToggles.extension_on === 'boolean'
-        ? userToggles.extension_on
-        : Boolean(Number(rules.extensionStatus));
-
-    // 白名单判断：site 在名单中且被显式关闭时返回 false（与原版 filter().length == 0 等价）
-    const notDisabled = (list, site) =>
-        !list.some(item => item.host === site && !(item.status && item.imp_status));
-
-    const pageUrl = host + location.pathname;
-
-    // 1) 展开全文 + 去除广告
-    for (const [site, pattern] of Object.entries(rules.domains.domain_list)) {
-        if (!matchesPattern(pattern, pageUrl)) continue;
-
-        if (extensionOn && rules.showMoreStatus && notDisabled(rules.showMoreWhiteList, site)) {
-            inject({ type: "file", code: `domain/${site}/read.js` });
-            if (isTopFrame && rules.tips) {
-                toast(200, 40, 75, browser.runtime.getURL('images/icon-512@1x.png'), '已为您自动展开全文', 2600);
-            }
-        }
-
-        if (extensionOn && rules.adFreeStatus && notDisabled(rules.adFreeWhiteList, site)) {
-            inject({ type: "file", code: `domain/${site}/call.js` });
-        }
-    }
-
-    // 2) 防 App 跳转
-    const searchPage = getSearchPage();
-    const jumpAppOn = extensionOn && Boolean(rules.jumpAppStatus);
-
-    for (const item of rules.jumpAppWhiteList) {
-        const app = item.host;
-        const enabled = jumpAppOn && item.status && item.imp_status;
-
-        if (app === 'baidu') {
-            // 百度搜索结果页的 DNR 拦截规则开关（ruleset_1）
-            enable_ruleset(rules.jumpAppStatus ? enabled : false);
-        }
-
-        if (!enabled || !searchPage) continue;
-
-        // bilibili / tieba 的防跳转脚本依赖 iframe 路径变量
-        // （MV3 不允许注入任意 code 字符串，改用 set_frame_path 由后台以 func+args 写入）
-        if (app === 'bilibili' || app === 'tieba') {
-            inject({ type: "set_frame_path", url: browser.runtime.getURL('iframe.html'), runAt: "document_start" });
-        }
-        // 还原原版行为：baidu 分支的防跳转脚本必须在文档开始时注入，晚于该时机将拦不住跳转
-        inject({
-            type: "file",
-            code: `jumpapp/${app}/content.${searchPage}.js`,
-            ...(app === 'baidu' ? { runAt: "document_start" } : {}),
-        });
-    }
-
-    // 3) 搜索页公共处理脚本（不依赖白名单，与原版行为一致）
-    if (searchPage) {
-        inject({ type: "file", code: `jumpapp/tc.${searchPage}.js` });
-    }
-
-    // 4) 用户自定义屏蔽规则（AdGuard 式元素选取，picker/popup 写入 ad101.user_rules）
-    // 独立于内置站点列表：任何 http(s) 站点上的自选规则都生效
-    try {
-        const { ad101_user_rules } = await browser.storage.local.get(["ad101_user_rules"]);
-        if (ad101_user_rules) {
-            const keys = [host];
-            let h = host, dot = h.indexOf('.');
-            while (dot !== -1 && dot < h.length - 2) {
-                h = h.slice(dot + 1);
-                keys.push(h);
-                dot = h.indexOf('.');
-            }
-            const sels = [];
-            for (const k of keys) {
-                for (const r of ad101_user_rules[k] ?? []) {
-                    if (r?.sel && r.on !== false) sels.push(r.sel);
-                }
-            }
-            if (sels.length) {
-                const style = document.createElement('style');
-                style.id = 'ad101-user-style';
-                style.textContent = sels.join(',\n') + ' { display:none !important; }';
-                (document.head || document.documentElement).appendChild(style);
-            }
-        }
-    } catch (e) {
-        console.warn('[ad101] apply user rules failed:', e);
+    "tips": 1,
+    "rules_version": 4,
+    "junkBlock": {
+        "status": 1,
+        "domains": [
+            "doubleclick.net",
+            "googlesyndication.com",
+            "googleadservices.com",
+            "google-analytics.com",
+            "adnxs.com",
+            "adsrvr.org",
+            "criteo.com",
+            "criteo.net",
+            "taboola.com",
+            "outbrain.com",
+            "scorecardresearch.com",
+            "cnzz.com",
+            "umeng.com",
+            "umeng.co",
+            "miaozhen.com",
+            "ipinyou.com",
+            "tanx.com",
+            "pos.baidu.com",
+            "cpro.baidu.com",
+            "mobads.baidu.com",
+            "hm.baidu.com",
+            "connect.facebook.net"
+        ],
+        "ips": []
+    },
+    "subscription": {
+        "status": 1,
+        "name": "AWAvenue Ads Rule",
+        "url": "https://github.boki.moe/https://raw.githubusercontent.com/TG-Twilight/AWAvenue-Ads-Rule/main/AWAvenue-Ads-Rule.txt"
     }
 }
-
-// ===== 消息分发（保留原 cmd 协议，供 background 反向调用） =====
-// 使用白名单而非 window[cmd]，避免任意全局函数（如 fetch / eval）被外部消息间接调用。
-const CONTENT_COMMANDS = new Set([
-    'inject', 'injectCSS', 'enable_ruleset', 'init_rules', 'reload', 'toast', 'close',
-]);
-
-browser.runtime.onMessage.addListener((request) => {
-    const cmd = request?.cmd;
-    if (cmd && CONTENT_COMMANDS.has(cmd) && typeof window[cmd] === 'function') {
-        try {
-            window[cmd](request.param);
-        } catch (e) {
-            console.warn('[ad101] command failed:', cmd, e);
-        }
-    }
-});
-
-init();

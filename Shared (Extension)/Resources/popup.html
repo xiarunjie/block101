@@ -1,11 +1,75 @@
 <!DOCTYPE html>
-<html>
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <link rel="stylesheet" href="popup.css">
     <script type="module" src="popup.js"></script>
 </head>
 <body>
-    <strong>重磅功能研发中,敬请期待!</strong>
+    <main id="app">
+        <header>
+            <img src="images/icon-96@1x.png" alt="" class="logo">
+            <h1>AD101</h1>
+        </header>
+
+        <div id="not-applicable" class="hidden">
+            <p>当前页面不适用</p>
+        </div>
+
+        <div id="panel" class="hidden">
+            <div class="row">
+                <div class="col">
+                    <span class="label">本站暂停拦截</span>
+                    <span id="host" class="sub"></span>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="site-toggle">
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <div class="row">
+                <div class="col">
+                    <span class="label">全局拦截</span>
+                    <span class="sub">所有站点</span>
+                </div>
+                <label class="switch">
+                    <input type="checkbox" id="global-toggle">
+                    <span class="slider"></span>
+                </label>
+            </div>
+
+            <p id="tip" class="tip hidden"></p>
+
+            <button id="pick-btn" class="btn" type="button">选取并屏蔽页面元素</button>
+
+            <section id="user-rules" class="hidden">
+                <h3>本页自定义规则</h3>
+                <ul id="rules-list"></ul>
+                <p id="rules-empty" class="tip">暂无自定义规则，点上方按钮在页面上选取</p>
+            </section>
+        </div>
+
+        <section class="stats">
+            <div class="stat">
+                <span class="num" id="stat-read">0</span>
+                <span class="stat-label">展开全文</span>
+            </div>
+            <div class="stat">
+                <span class="num" id="stat-adblock">0</span>
+                <span class="stat-label">去广告</span>
+            </div>
+            <div class="stat">
+                <span class="num" id="stat-nojump">0</span>
+                <span class="stat-label">防跳转</span>
+            </div>
+        </section>
+
+        <section class="log">
+            <h3>最近记录</h3>
+            <ul id="log-list"></ul>
+            <p id="log-empty" class="tip">暂无记录，去 Safari 逛逛吧</p>
+        </section>
+    </main>
 </body>
 </html>

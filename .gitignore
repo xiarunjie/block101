@@ -1,1 +1,6 @@
 .DS_Store
+# Safari 生成的 declarativeNetRequest 索引缓存（构建时自动重建）
+_metadata/
+*.xcuserdata
+DerivedData/
+build/
